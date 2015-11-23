@@ -1,5 +1,11 @@
 require 'azure'
 
+class ::File
+  def each_chunk(chunk_size=2**20) # 1mb chunks
+    yield read(chunk_size) until eof?
+  end
+end
+
 module CarrierWave
   module Storage
     class Azure < Abstract
@@ -23,18 +29,32 @@ module CarrierWave
       end
 
       class File
-        attr_reader :path
+        attr_reader :path, :block_list
 
         def initialize(uploader, connection, path)
           @uploader = uploader
           @connection = connection
           @path = path
+          @counter = 1
+          @block_list = []
         end
 
         def store!(file)
-          @content = file.read
-          @content_type = file.content_type
-          @connection.create_block_blob @uploader.azure_container, @path, @content, content_type: @content_type
+          file.to_file.each_chunk do |chunk|
+            Rails.logger.info "CHUNK #{@counter}"
+            block_id = @counter.to_s.rjust(5, '0')
+            block_list << [block_id, :uncommitted]
+
+            options = {
+              content_md5: Base64.strict_encode64(Digest::MD5.digest(chunk)),
+              timeout:     300 # 5 minute timeout
+            }
+
+            @connection.create_blob_block @uploader.azure_container, @path, block_id, chunk, options
+            @counter += 1
+          end
+
+          @connection.commit_blob_blocks(@uploader.azure_container, @path, block_list)
           true
         end
 
