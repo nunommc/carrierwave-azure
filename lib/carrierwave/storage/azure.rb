@@ -21,10 +21,8 @@ module CarrierWave
 
       def connection
         @connection ||= begin
-          %i(storage_account_name storage_access_key storage_blob_host).each do |key|
-            ::Azure.config.send("#{key}=", uploader.send("azure_#{key}"))
-          end
-          ::Azure::Blob::BlobService.new
+          ::Azure::Storage.setup(:storage_account_name => uploader.azure_storage_account_name, :storage_access_key => uploader.azure_storage_access_key)
+          ::Azure::Storage::Blob::BlobService.new
         end
       end
 
@@ -40,21 +38,24 @@ module CarrierWave
         end
 
         def store!(file)
+          begin
+            blob, blob_body = @connection.get_blob @uploader.azure_container, @path
+          rescue
+            blob = @connection.create_append_blob @uploader.azure_container, @path, { blob_content_type: file.content_type }
+          end
+
+          return unless blob
+
           file.to_file.each_chunk do |chunk|
             Rails.logger.info { "CHUNK #{@counter}" }
-            block_id = @counter.to_s.rjust(5, '0')
-            block_list << [block_id, :uncommitted]
 
             options = {
               content_md5: Base64.strict_encode64(Digest::MD5.digest(chunk)),
               timeout:     300 # 5 minute timeout
             }
 
-            @connection.create_blob_block @uploader.azure_container, @path, block_id, chunk, options
-            @counter += 1
+            @connection.append_blob_block @uploader.azure_container, @path, chunk, options
           end
-
-          @connection.commit_blob_blocks(@uploader.azure_container, @path, block_list, { blob_content_type: file.content_type })
           true
         end
 
